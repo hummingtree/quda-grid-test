@@ -35,6 +35,8 @@ int main(int argc, char** argv) {
   RealD eofa_shift = -1.0;
   int eofa_pm = 1;
 
+  double conversion_factor = (b*(4-M5)+1);
+
   Grid_init(&argc, &argv);
 	GridLogIterative.Active(1);
 	
@@ -46,13 +48,9 @@ int main(int argc, char** argv) {
 	GridRedBlackCartesian* UrbGrid = SpaceTimeGrid::makeFourDimRedBlackGrid(UGrid);
 	GridCartesian* FGrid = SpaceTimeGrid::makeFiveDimGrid(Ls, UGrid);
 	GridRedBlackCartesian* FrbGrid = SpaceTimeGrid::makeFiveDimRedBlackGrid(Ls, UGrid);
-
 	UGrid->show_decomposition();
 
   initCommsGridQuda(4, mpi_layout.data(), nullptr, nullptr);
-  
-  printfQuda("initializing communciation on node #%03d... \n", comm_rank());
-  // initQuda(UGrid->ThisRank()%4);
   initQuda(-1000);
   printfQuda("communciation initialized. \n");
 
@@ -87,18 +85,38 @@ int main(int argc, char** argv) {
       pad_size = std::max(pad_size, t_face_size);
   gauge_param.ga_pad = pad_size;
 
-  inv_param.dslash_type   = QUDA_MOBIUS_DWF_DSLASH;
+  inv_param.dslash_type   = QUDA_MOBIUS_DWF_EOFA_DSLASH;
 
   inv_param.mass          = mass;
-  inv_param.m5            = M5;
-  inv_param.b_5[0]        = b;
-  inv_param.c_5[0]        = c;
+  inv_param.m5            = -M5;
+  for(int s = 0; s < Ls; s++){
+  inv_param.b_5[s]        = b;
+  inv_param.c_5[s]        = c;
+  }
   inv_param.mq1           = mass;
   inv_param.mq2           = mq2;
   inv_param.mq3           = mq3;
   inv_param.eofa_shift    = eofa_shift;
   inv_param.eofa_pm       = eofa_pm;
   // End setup all the QUDA parameters
+  
+  inv_param.solve_type    = QUDA_NORMOP_PC_SOLVE;
+  inv_param.matpc_type    = QUDA_MATPC_EVEN_EVEN;
+  inv_param.dagger        = QUDA_DAG_NO;
+
+  inv_param.cpu_prec      = QUDA_DOUBLE_PRECISION;;
+  inv_param.cuda_prec     = QUDA_DOUBLE_PRECISION;;
+
+  inv_param.input_location  = QUDA_CPU_FIELD_LOCATION;
+  inv_param.output_location = QUDA_CPU_FIELD_LOCATION;
+
+  inv_param.sp_pad = 0;
+  inv_param.cl_pad = 0;
+
+  inv_param.gamma_basis = QUDA_DEGRAND_ROSSI_GAMMA_BASIS; // test code only supports DeGrand-Rossi Basis
+  inv_param.dirac_order = QUDA_DIRAC_ORDER;
+
+  inv_param.verbosity     = QUDA_DEBUG_VERBOSE;
 
 //	qlat::Coordinate node_coor(UGrid->ThisProcessorCoor()[0], UGrid->ThisProcessorCoor()[1], UGrid->ThisProcessorCoor()[2], UGrid->ThisProcessorCoor()[3]);
 //	qlat::Coordinate node_size(GridDefaultMpi()[0], GridDefaultMpi()[1], GridDefaultMpi()[2], GridDefaultMpi()[3]);
@@ -121,7 +139,10 @@ int main(int argc, char** argv) {
 	SU3::HotConfiguration(RNG4, Umu);
 
   printfQuda("Grid computed plaquette = %16.12e\n", WilsonLoops<PeriodicGimplR>::avgPlaquette(Umu));
-
+  
+  int V = local_dim[0]*local_dim[1]*local_dim[2]*local_dim[3];
+  int Vh = V/2;
+  void* quda_gauge = nullptr;
 {
   using sobj = LatticeGaugeField::vector_object::scalar_object;
   // using sobj = vLorentzColourMatrix;
@@ -129,16 +150,14 @@ int main(int argc, char** argv) {
   unvectorizeToLexOrdArray(out_lex, Umu);
   
   printfQuda("sizeof(sobj) = %d\n", sizeof(sobj)); 
-  int V = local_dim[0]*local_dim[1]*local_dim[2]*local_dim[3];
-  int Vh = V/2;
   assert(Umu._grid->lSites() == V);
   
-  sobj* quda_gauge = (sobj*)malloc(Umu._grid->lSites()*sizeof(sobj));
+  quda_gauge = reinterpret_cast<void*>(malloc(Umu._grid->lSites()*sizeof(sobj)));
   for(int grid_idx = 0; grid_idx < V; grid_idx++){
     Coordinate Y = coordinate_from_index(grid_idx, local_dim);
     int eo = (Y[0]+Y[1]+Y[2]+Y[3])%2;
     int quda_idx = grid_idx/2 + eo*Vh;
-    quda_gauge[quda_idx] = out_lex[grid_idx];
+    reinterpret_cast<sobj*>(quda_gauge)[quda_idx] = out_lex[grid_idx];
   }
   
   loadGaugeQuda((void*)quda_gauge, &gauge_param);
@@ -148,6 +167,33 @@ int main(int argc, char** argv) {
   printfQuda("Computed plaquette is %16.12e (spatial = %16.12e, temporal = %16.12e)\n", plaq[0], plaq[1], plaq[2]);
 }
 
+	LatticeFermionD src_e(FrbGrid);
+	LatticeFermionD sol_e(FrbGrid);
+	LatticeFermionD sol_e_quda(FrbGrid);
+	pickCheckerboard(Even, src_e, src);
+	pickCheckerboard(Even, sol_e, sol);
+	pickCheckerboard(Even, sol_e_quda, sol);
+
+  void* quda_src = nullptr;
+  void* quda_sol = nullptr;
+  using fsobj = LatticeFermion::vector_object::scalar_object;
+
+  std::vector<fsobj> out_lex(src_e._grid->lSites());
+  unvectorizeToLexOrdArray(out_lex, src_e);
+
+  assert(src_e._grid->lSites() == Vh*Ls);
+
+  quda_src = reinterpret_cast<void*>(malloc(src_e._grid->lSites()*sizeof(fsobj)));
+  quda_sol = reinterpret_cast<void*>(malloc(src_e._grid->lSites()*sizeof(fsobj)));
+  
+  for(int x_cb = 0; x_cb < Vh; x_cb++){
+    for(int s = 0; s < Ls; s++){
+      int grid_idx = x_cb*Ls+s;
+      int quda_idx = s*Vh+x_cb;
+      reinterpret_cast<fsobj*>(quda_src)[quda_idx] = out_lex[grid_idx];
+    } 
+  }
+
 //	FieldMetaData header;
 //	std::string file("/global/homes/j/jiquntu/configurations/32x64x12ID_b1.75_mh0.045_ml0.0001/configurations/ckpoint_lat.160");
 //	NerscIO::readConfiguration(Umu, header, file);
@@ -156,31 +202,34 @@ int main(int argc, char** argv) {
 
 	MobiusEOFAFermionR DMobiusEOFA(Umu, *FGrid, *FrbGrid, *UGrid, *UrbGrid, mass, mq2, mq3, eofa_shift, eofa_pm, M5, b, c);
 	DMobiusEOFA.ZeroCounters();
-
-	LatticeFermionD src_odd(FrbGrid);
-	LatticeFermionD sol_odd(FrbGrid);
-	pickCheckerboard(Odd, src_odd, src);
-	pickCheckerboard(Odd, sol_odd, sol);
 	
 //	GridStopWatch CGTimer;
 
 //	SchurDiagMooeeOperator<MobiusFermionD, LatticeFermionD> HermOpEO(DMobiusEOFA);
 //	ConjugateGradient<LatticeFermion> CG(1e-4, 2000, 0);// switch off the assert
 
-  DMobiusEOFA.Mooee(src_odd, sol_odd);
+  dslashQuda_mobius_eofa(quda_sol, quda_src, &inv_param, QUDA_EVEN_PARITY, 0);
+  std::vector<fsobj> in_lex(src_e._grid->lSites());
+  for(int x_cb = 0; x_cb < Vh; x_cb++){
+    for(int s = 0; s < Ls; s++){
+      int grid_idx = x_cb*Ls+s;
+      int quda_idx = s*Vh+x_cb;
+      in_lex[grid_idx] = reinterpret_cast<fsobj*>(quda_sol)[quda_idx];
+    } 
+  }
+  vectorizeFromLexOrdArray(in_lex, sol_e_quda);
 
-//	LatticeFermionD mdag_src_odd(FrbGrid);
-//	mdag_src_odd.checkerboard = Odd;
-//	HermOpEO.AdjOp(src_odd, mdag_src_odd);
-//	
-//  CGTimer.Start();
-//	CG(HermOpEO, mdag_src_odd, sol_odd);
-//	CGTimer.Stop();
-//	std::cout << GridLogMessage << "Total CG time : " << CGTimer.Elapsed() << std::endl;
+  DMobiusEOFA.Mooee(src_e, sol_e);
 
-  std::cout << GridLogMessage << "EOFA norm   " << norm2(src_odd) << " " << norm2(sol_odd) << std::endl;
+  LatticeFermion err(FrbGrid);
+  pickCheckerboard(Even, err, sol);
+  err = sol_e - conversion_factor * sol_e_quda;
+
+  printf("EOFA: Grid source norm2 = %16.12e, solution norm2 = %16.12e, error norm2 = %16.12e\n", norm2(src_e), norm2(sol_e), norm2(err));
 
 	DMobiusEOFA.Report();
+
+  endQuda();
 
 	Grid_finalize();
 }
