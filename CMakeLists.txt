@@ -11,7 +11,7 @@ set( QUDA_BUILD $ENV{HOME}/quda-build/overlapping-schwarz )
 set( QUDA_SRC $ENV{HOME}/quda-src/quda )
 set( QLAT_DIR $ENV{HOME}/qlat-build )
 
-add_definitions("-O3 -fopenmp")
+add_definitions("-O3 -fopenmp -DMPI_COMMS -DMULTI_GPU")
 
 link_directories( ${grid_dir}/lib ${generic_libs}/lib ${QUDA_BUILD}/lib )
 include_directories( ${grid_dir}/include ${generic_libs}/include ${QUDA_SRC}/include )

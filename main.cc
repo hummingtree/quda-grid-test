@@ -10,6 +10,22 @@ using namespace Grid::QCD;
 
 using Coordinate = std::array<int,4>;
 
+static int mpi_rank_from_coords(const int* coords, void* fdata)
+{
+  int *dims = static_cast<int *>(fdata);
+
+  int rank = coords[3];
+  for (int i = 2; i >= 0; i--) {
+    rank = dims[i] * rank + coords[i];
+  }
+  return rank;
+}
+
+void comm_set_gridsize(int *grid)
+{
+  initCommsGridQuda(4, grid, mpi_rank_from_coords, static_cast<void *>(grid));
+}
+
 inline Coordinate coordinate_from_index(int index, const Coordinate& size)
 {
   Coordinate x;
@@ -25,16 +41,17 @@ inline Coordinate coordinate_from_index(int index, const Coordinate& size)
 
 int main(int argc, char** argv) {
 
-  const int Ls = 12;
-	RealD mass = 1.0;
-	RealD M5   = 1.8;
-	RealD b    = 22./12.;
-	RealD c    = 10./12.;
-  RealD mq2  = 0.085;
-  RealD mq3  = 1.0;
-  RealD eofa_shift = -1.0;
-  int eofa_pm = 1;
+  const int Ls      = 12;
+	RealD mass        = 1.0;
+	RealD M5          = 1.8;
+	RealD b           = 22./12.;
+	RealD c           = 10./12.;
+  RealD mq2         = 0.085;
+  RealD mq3         = 1.0;
+  RealD eofa_shift  = -1.0;
+  int eofa_pm       = 1;
 
+  // The conversion factor between Grid/CPS and Quda's Mobius 
   double conversion_factor = (b*(4-M5)+1);
 
   Grid_init(&argc, &argv);
@@ -50,9 +67,12 @@ int main(int argc, char** argv) {
 	GridRedBlackCartesian* FrbGrid = SpaceTimeGrid::makeFiveDimRedBlackGrid(Ls, UGrid);
 	UGrid->show_decomposition();
 
-  initCommsGridQuda(4, mpi_layout.data(), nullptr, nullptr);
+  // The following sets the MPI comm stuff.
+  // For QMP the setup is even simpler but I am not familiar with that.
+  // initCommsGridQuda(4, mpi_layout.data(), nullptr, nullptr);
+  comm_set_gridsize(mpi_layout.data());
   initQuda(-1000);
-  printfQuda("communciation initialized. \n");
+  printfQuda("communciation initialized on node #%03d. \n", comm_rank());
 
   // Now setup all the QUDA parameters
   QudaGaugeParam gauge_param = newQudaGaugeParam();
@@ -62,19 +82,27 @@ int main(int argc, char** argv) {
   for(int mu = 0; mu < 4; mu++){
     gauge_param.X[mu] = local_dim[mu] = latt_size[mu]/mpi_layout[mu];
   }
-  inv_param.Ls = Ls;
   
+  // ... OK. I don't know what this means
   gauge_param.type        = QUDA_WILSON_LINKS;
+  
+  // Slowest changing to fastest changing: even-odd, mu, x_cb_4d, row, column, complex 
+  // See the code later in this file to see the conversion between Grid inde and Quda index.
   gauge_param.gauge_order = QUDA_MILC_GAUGE_ORDER;
 
+  // The precision used here should be the same as those set in the inv_param, i.e.
+  // gauge_param.cuda_prec = inv_param.cuda_prec
+  // gauge_param.cuda_prec_sloppy = inv_param.cuda_prec_sloppy
   gauge_param.cpu_prec    = QUDA_DOUBLE_PRECISION;
   gauge_param.cuda_prec   = QUDA_DOUBLE_PRECISION;
   gauge_param.reconstruct = QUDA_RECONSTRUCT_NO;
+  gauge_param.cuda_prec_sloppy    = QUDA_HALF_PRECISION;
+  gauge_param.reconstruct_sloppy  = QUDA_RECONSTRUCT_NO;
+  
   gauge_param.gauge_fix   = QUDA_GAUGE_FIXED_NO;
 
   gauge_param.anisotropy  = 1.0;
   gauge_param.t_boundary  = QUDA_PERIODIC_T;
-  gauge_param.ga_pad = 0;
 
   int x_face_size = gauge_param.X[1] * gauge_param.X[2] * gauge_param.X[3] / 2;
   int y_face_size = gauge_param.X[0] * gauge_param.X[2] * gauge_param.X[3] / 2;
@@ -83,40 +111,91 @@ int main(int argc, char** argv) {
   int pad_size = std::max(x_face_size, y_face_size);
       pad_size = std::max(pad_size, z_face_size);
       pad_size = std::max(pad_size, t_face_size);
-  gauge_param.ga_pad = pad_size;
-
+  gauge_param.ga_pad      = pad_size;
+  
+  inv_param.Ls            = Ls;
   inv_param.dslash_type   = QUDA_MOBIUS_DWF_EOFA_DSLASH;
-
   inv_param.mass          = mass;
+  // Note that Quda uses -M5 as M5 ...
   inv_param.m5            = -M5;
   for(int s = 0; s < Ls; s++){
-  inv_param.b_5[s]        = b;
-  inv_param.c_5[s]        = c;
+    inv_param.b_5[s]      = b;
+    inv_param.c_5[s]      = c;
   }
+  
+  // kappa is irrelevant for Mobius/DWF but you have to set it.
+  inv_param.kappa         = 1./(2.*(1.+3./1.+mass));
+  inv_param.mass_normalization    = QUDA_KAPPA_NORMALIZATION; 
+  inv_param.solver_normalization  = QUDA_DEFAULT_NORMALIZATION;
+  
+  // Whether or not content of you input void* pointer will be modified
+  inv_param.preserve_source       = QUDA_PRESERVE_SOURCE_YES;
+
+  // I don't know what these are but you have to set them.
+  inv_param.use_sloppy_partial_accumulator = 0;
+  inv_param.solution_accumulator_pipeline  = 1;
+  
+  // This is for the reliable update. Just set it to some large number.
+  inv_param.max_res_increase = 20000;
+
   inv_param.mq1           = mass;
   inv_param.mq2           = mq2;
   inv_param.mq3           = mq3;
   inv_param.eofa_shift    = eofa_shift;
   inv_param.eofa_pm       = eofa_pm;
-  // End setup all the QUDA parameters
+ 
+  // The solver tolerance, i.e. |MdagM * x - b| < tol * |b|
+  inv_param.tol           = 1e-10;
+  inv_param.tol_restart   = 1e-3;
   
+  // The maximum number of iterations.
+  inv_param.maxiter       = 50000;
+
+  // This is for Quda's sophisticated reliable update. 0.1 should be good.
+  inv_param.reliable_delta= 0.1;
+
+  // NORMOP_PC means preconditioned normal operator MdagM
   inv_param.solve_type    = QUDA_NORMOP_PC_SOLVE;
+  
+  // QUDA_MATPC_EVEN_EVEN means we solve on even sites and use symmetric preconditioning
+  // The other options are:
+  // QUDA_MATPC_ODD_ODD,
+  // QUDA_MATPC_EVEN_EVEN_ASYMMETRIC,
+  // QUDA_MATPC_ODD_ODD_ASYMMETRIC,
+  //
+  // There might be a performance difference.
   inv_param.matpc_type    = QUDA_MATPC_EVEN_EVEN;
+
+  // Eventually we want the unpreconditioned solution.
+  inv_param.solution_type = QUDA_MAT_SOLUTION;
+  
+  // MSPCG does NOT support EOFA, yet.
+  inv_param.inv_type      = QUDA_CG_INVERTER;
+
   inv_param.dagger        = QUDA_DAG_NO;
 
+  // The precision used to correct the inner solver.
   inv_param.cpu_prec      = QUDA_DOUBLE_PRECISION;;
   inv_param.cuda_prec     = QUDA_DOUBLE_PRECISION;;
+  // The sloppy(inner) solver precision 
+  inv_param.cuda_prec_sloppy = QUDA_HALF_PRECISION;
 
   inv_param.input_location  = QUDA_CPU_FIELD_LOCATION;
   inv_param.output_location = QUDA_CPU_FIELD_LOCATION;
-
+  
+  // I don't know what these are but you have to set them.
   inv_param.sp_pad = 0;
   inv_param.cl_pad = 0;
 
-  inv_param.gamma_basis = QUDA_DEGRAND_ROSSI_GAMMA_BASIS; // test code only supports DeGrand-Rossi Basis
-  inv_param.dirac_order = QUDA_DIRAC_ORDER;
+  // Both CPS and Grid use this gamma matrix representation
+  inv_param.gamma_basis   = QUDA_DEGRAND_ROSSI_GAMMA_BASIS;
+  
+  // Slowest changing to fastest changing: even-odd, Ls, x_cb_4d, spin, color, complex
+  // See the code later in this file to see the conversion between Grid inde and Quda index.
+  inv_param.dirac_order   = QUDA_DIRAC_ORDER;
 
-  inv_param.verbosity     = QUDA_DEBUG_VERBOSE;
+  // QUDA_DEBUG_VERBOSE is too nasty.
+  inv_param.verbosity     = QUDA_VERBOSE;
 
 //	qlat::Coordinate node_coor(UGrid->ThisProcessorCoor()[0], UGrid->ThisProcessorCoor()[1], UGrid->ThisProcessorCoor()[2], UGrid->ThisProcessorCoor()[3]);
 //	qlat::Coordinate node_size(GridDefaultMpi()[0], GridDefaultMpi()[1], GridDefaultMpi()[2], GridDefaultMpi()[3]);
@@ -133,7 +212,8 @@ int main(int argc, char** argv) {
 	RNG4.SeedFixedIntegers(seeds4);
 
 	LatticeFermion src(FGrid); gaussian(RNG5, src);
-	LatticeFermion sol(FGrid); sol = zero;
+	LatticeFermion src_quda(FGrid); src_quda = zero;
+  LatticeFermion sol(FGrid); sol = zero;
 	
   LatticeGaugeField Umu(UGrid);
 	SU3::HotConfiguration(RNG4, Umu);
@@ -143,6 +223,8 @@ int main(int argc, char** argv) {
   int V = local_dim[0]*local_dim[1]*local_dim[2]*local_dim[3];
   int Vh = V/2;
   void* quda_gauge = nullptr;
+
+// unvectorize the Grid gauge field, change to QUDA_MILC_GAUGE_ORDER and load gauge field to Quda 
 {
   using sobj = LatticeGaugeField::vector_object::scalar_object;
   // using sobj = vLorentzColourMatrix;
@@ -169,29 +251,28 @@ int main(int argc, char** argv) {
 
 	LatticeFermionD src_e(FrbGrid);
 	LatticeFermionD sol_e(FrbGrid);
-	LatticeFermionD sol_e_quda(FrbGrid);
 	pickCheckerboard(Even, src_e, src);
 	pickCheckerboard(Even, sol_e, sol);
-	pickCheckerboard(Even, sol_e_quda, sol);
 
+// unvectorize the Grid fermion field, change to QUDA_DIRAC_ORDER 
   void* quda_src = nullptr;
   void* quda_sol = nullptr;
   using fsobj = LatticeFermion::vector_object::scalar_object;
 
-  std::vector<fsobj> out_lex(src_e._grid->lSites());
-  unvectorizeToLexOrdArray(out_lex, src_e);
+  std::vector<fsobj> out_lex(src._grid->lSites());
+  unvectorizeToLexOrdArray(out_lex, src);
 
-  assert(src_e._grid->lSites() == Vh*Ls);
-
-  quda_src = reinterpret_cast<void*>(malloc(src_e._grid->lSites()*sizeof(fsobj)));
-  quda_sol = reinterpret_cast<void*>(malloc(src_e._grid->lSites()*sizeof(fsobj)));
+  quda_src = reinterpret_cast<void*>(malloc(src._grid->lSites()*sizeof(fsobj)));
+  quda_sol = reinterpret_cast<void*>(malloc(src._grid->lSites()*sizeof(fsobj)));
   
-  for(int x_cb = 0; x_cb < Vh; x_cb++){
+  for(int grid_idx_4d = 0; grid_idx_4d < V; grid_idx_4d++){
+    Coordinate Y = coordinate_from_index(grid_idx_4d, local_dim);
+    int eo = (Y[0]+Y[1]+Y[2]+Y[3])%2;
     for(int s = 0; s < Ls; s++){
-      int grid_idx = x_cb*Ls+s;
-      int quda_idx = s*Vh+x_cb;
+      int quda_idx = eo*Vh*Ls + s*Vh+grid_idx_4d/2;
+      int grid_idx = grid_idx_4d*Ls + s;
       reinterpret_cast<fsobj*>(quda_src)[quda_idx] = out_lex[grid_idx];
-    } 
+    }
   }
 
 //	FieldMetaData header;
@@ -203,29 +284,35 @@ int main(int argc, char** argv) {
 	MobiusEOFAFermionR DMobiusEOFA(Umu, *FGrid, *FrbGrid, *UGrid, *UrbGrid, mass, mq2, mq3, eofa_shift, eofa_pm, M5, b, c);
 	DMobiusEOFA.ZeroCounters();
 	
-//	GridStopWatch CGTimer;
-
 //	SchurDiagMooeeOperator<MobiusFermionD, LatticeFermionD> HermOpEO(DMobiusEOFA);
 //	ConjugateGradient<LatticeFermion> CG(1e-4, 2000, 0);// switch off the assert
 
-  dslashQuda_mobius_eofa(quda_sol, quda_src, &inv_param, QUDA_EVEN_PARITY, 0);
-  std::vector<fsobj> in_lex(src_e._grid->lSites());
-  for(int x_cb = 0; x_cb < Vh; x_cb++){
+// Calling invertQuda(...) to perform the inversion.
+  invertQuda(quda_sol, quda_src, &inv_param);
+  // dslashQuda_mobius_eofa(quda_sol, quda_src, &inv_param, QUDA_EVEN_PARITY, 0);
+
+// Change back to the usual Grid/CPS order and vectorize.
+  std::vector<fsobj> in_lex(src._grid->lSites());
+  for(int grid_idx_4d = 0; grid_idx_4d < V; grid_idx_4d++){
+    Coordinate Y = coordinate_from_index(grid_idx_4d, local_dim);
+    int eo = (Y[0]+Y[1]+Y[2]+Y[3])%2;
     for(int s = 0; s < Ls; s++){
-      int grid_idx = x_cb*Ls+s;
-      int quda_idx = s*Vh+x_cb;
+      int quda_idx = eo*Vh*Ls + s*Vh+grid_idx_4d/2;
+      int grid_idx = grid_idx_4d*Ls + s;
       in_lex[grid_idx] = reinterpret_cast<fsobj*>(quda_sol)[quda_idx];
-    } 
+    }
   }
-  vectorizeFromLexOrdArray(in_lex, sol_e_quda);
+  vectorizeFromLexOrdArray(in_lex, sol);
 
-  DMobiusEOFA.Mooee(src_e, sol_e);
+  // If we apply M on sol we should get src back, up to an overall numerical factor.
+  DMobiusEOFA.M(sol, src_quda);
+  // Compare src and src_quda.
+  LatticeFermion err(FGrid);
+  err = src - (1./conversion_factor) * src_quda;
 
-  LatticeFermion err(FrbGrid);
-  pickCheckerboard(Even, err, sol);
-  err = sol_e - conversion_factor * sol_e_quda;
-
-  printf("EOFA: Grid source norm2 = %16.12e, solution norm2 = %16.12e, error norm2 = %16.12e\n", norm2(src_e), norm2(sol_e), norm2(err));
+  printfQuda("EOFA: Grid source norm2 = %16.12e, Quda source norm2 = %16.12e, \n"
+    "error norm2 = %16.12e, error \% = %8.4e\n", norm2(src), norm2(src_quda), 
+    norm2(err), std::sqrt(norm2(err)/norm2(src)));
 
 	DMobiusEOFA.Report();
 
