@@ -42,10 +42,10 @@ inline Coordinate coordinate_from_index(int index, const Coordinate& size)
 int main(int argc, char** argv) {
 
   const int Ls      = 12;
-	RealD mass        = 1.0;
-	RealD M5          = 1.8;
-	RealD b           = 22./12.;
-	RealD c           = 10./12.;
+  RealD mass        = 1.0;
+  RealD M5          = 1.8;
+  RealD b           = 22./12.;
+  RealD c           = 10./12.;
   RealD mq2         = 0.085;
   RealD mq3         = 1.0;
   RealD eofa_shift  = -1.0;
@@ -55,17 +55,17 @@ int main(int argc, char** argv) {
   double conversion_factor = (b*(4-M5)+1);
 
   Grid_init(&argc, &argv);
-	GridLogIterative.Active(1);
-	
+  GridLogIterative.Active(1);
+  
   std::vector<int> simd_layout = GridDefaultSimd(Nd,vComplexD::Nsimd());
-	std::vector<int> mpi_layout  = GridDefaultMpi();
-	std::vector<int> latt_size   = GridDefaultLatt();
-	
+  std::vector<int> mpi_layout  = GridDefaultMpi();
+  std::vector<int> latt_size   = GridDefaultLatt();
+  
   GridCartesian* UGrid = SpaceTimeGrid::makeFourDimGrid(GridDefaultLatt(), GridDefaultSimd(Nd, vComplexD::Nsimd()), GridDefaultMpi());
-	GridRedBlackCartesian* UrbGrid = SpaceTimeGrid::makeFourDimRedBlackGrid(UGrid);
-	GridCartesian* FGrid = SpaceTimeGrid::makeFiveDimGrid(Ls, UGrid);
-	GridRedBlackCartesian* FrbGrid = SpaceTimeGrid::makeFiveDimRedBlackGrid(Ls, UGrid);
-	UGrid->show_decomposition();
+  GridRedBlackCartesian* UrbGrid = SpaceTimeGrid::makeFourDimRedBlackGrid(UGrid);
+  GridCartesian* FGrid = SpaceTimeGrid::makeFiveDimGrid(Ls, UGrid);
+  GridRedBlackCartesian* FrbGrid = SpaceTimeGrid::makeFiveDimRedBlackGrid(Ls, UGrid);
+  UGrid->show_decomposition();
 
   // The following sets the MPI comm stuff.
   // For QMP the setup is even simpler but I am not familiar with that.
@@ -201,27 +201,27 @@ int main(int argc, char** argv) {
   // If NO Quda will zero the input solution pointer before the solve.
   inv_param.use_init_guess = QUDA_USE_INIT_GUESS_YES;
 
-//	qlat::Coordinate node_coor(UGrid->ThisProcessorCoor()[0], UGrid->ThisProcessorCoor()[1], UGrid->ThisProcessorCoor()[2], UGrid->ThisProcessorCoor()[3]);
-//	qlat::Coordinate node_size(GridDefaultMpi()[0], GridDefaultMpi()[1], GridDefaultMpi()[2], GridDefaultMpi()[3]);
-//	qlat::begin(qlat::index_from_coordinate(node_coor, node_size), node_size);
-//	printf("Node #%03d(grid): %02dx%02dx%02dx%02d ; #%03d(qlat): %02dx%02dx%02dx%02d\n", UGrid->ThisRank(), 
-//				UGrid->ThisProcessorCoor()[0], UGrid->ThisProcessorCoor()[1], UGrid->ThisProcessorCoor()[2], UGrid->ThisProcessorCoor()[3], 
-//				qlat::get_id_node(), qlat::get_coor_node()[0], qlat::get_coor_node()[1], qlat::get_coor_node()[2], qlat::get_coor_node()[3]);
-	
-	std::vector<int> seeds4({1, 2, 3, 4});
-	std::vector<int> seeds5({5, 6, 7, 8});
-	GridParallelRNG RNG5(FGrid);
-	RNG5.SeedFixedIntegers(seeds5);
-	GridParallelRNG RNG4(UGrid);
-	RNG4.SeedFixedIntegers(seeds4);
+//  qlat::Coordinate node_coor(UGrid->ThisProcessorCoor()[0], UGrid->ThisProcessorCoor()[1], UGrid->ThisProcessorCoor()[2], UGrid->ThisProcessorCoor()[3]);
+//  qlat::Coordinate node_size(GridDefaultMpi()[0], GridDefaultMpi()[1], GridDefaultMpi()[2], GridDefaultMpi()[3]);
+//  qlat::begin(qlat::index_from_coordinate(node_coor, node_size), node_size);
+//  printf("Node #%03d(grid): %02dx%02dx%02dx%02d ; #%03d(qlat): %02dx%02dx%02dx%02d\n", UGrid->ThisRank(), 
+//        UGrid->ThisProcessorCoor()[0], UGrid->ThisProcessorCoor()[1], UGrid->ThisProcessorCoor()[2], UGrid->ThisProcessorCoor()[3], 
+//        qlat::get_id_node(), qlat::get_coor_node()[0], qlat::get_coor_node()[1], qlat::get_coor_node()[2], qlat::get_coor_node()[3]);
+  
+  std::vector<int> seeds4({1, 2, 3, 4});
+  std::vector<int> seeds5({5, 6, 7, 8});
+  GridParallelRNG RNG5(FGrid);
+  RNG5.SeedFixedIntegers(seeds5);
+  GridParallelRNG RNG4(UGrid);
+  RNG4.SeedFixedIntegers(seeds4);
 
-	LatticeFermion src(FGrid); gaussian(RNG5, src);
-	LatticeFermion src_quda(FGrid); src_quda = zero;
+  LatticeFermion src(FGrid); gaussian(RNG5, src);
+  LatticeFermion src_quda(FGrid); src_quda = zero;
   LatticeFermion sol(FGrid); sol = zero;
-	LatticeFermion sol_quda(FGrid); sol_quda = zero;
-	
+  LatticeFermion sol_quda(FGrid); sol_quda = zero;
+  
   LatticeGaugeField Umu(UGrid);
-	SU3::HotConfiguration(RNG4, Umu);
+  SU3::HotConfiguration(RNG4, Umu);
 
   printfQuda("Grid computed plaquette = %16.12e\n", WilsonLoops<PeriodicGimplR>::avgPlaquette(Umu));
   
@@ -254,10 +254,10 @@ int main(int argc, char** argv) {
   printfQuda("Computed plaquette is %16.12e (spatial = %16.12e, temporal = %16.12e)\n", plaq[0], plaq[1], plaq[2]);
 }
 
-	LatticeFermionD src_e(FrbGrid);
-	LatticeFermionD sol_e(FrbGrid);
-	pickCheckerboard(Even, src_e, src);
-	pickCheckerboard(Even, sol_e, sol);
+  LatticeFermionD src_e(FrbGrid);
+  LatticeFermionD sol_e(FrbGrid);
+  pickCheckerboard(Even, src_e, src);
+  pickCheckerboard(Even, sol_e, sol);
 
 // unvectorize the Grid fermion field, change to QUDA_DIRAC_ORDER 
   void* quda_src = nullptr;
@@ -280,17 +280,17 @@ int main(int argc, char** argv) {
     }
   }
 
-//	FieldMetaData header;
-//	std::string file("/global/homes/j/jiquntu/configurations/32x64x12ID_b1.75_mh0.045_ml0.0001/configurations/ckpoint_lat.160");
-//	NerscIO::readConfiguration(Umu, header, file);
+//  FieldMetaData header;
+//  std::string file("/global/homes/j/jiquntu/configurations/32x64x12ID_b1.75_mh0.045_ml0.0001/configurations/ckpoint_lat.160");
+//  NerscIO::readConfiguration(Umu, header, file);
 
-	std::cout << GridLogMessage << "Lattice dimensions: " << GridDefaultLatt() << "   Ls: " << Ls << std::endl;
+  std::cout << GridLogMessage << "Lattice dimensions: " << GridDefaultLatt() << "   Ls: " << Ls << std::endl;
 
-	MobiusEOFAFermionR DMobiusEOFA(Umu, *FGrid, *FrbGrid, *UGrid, *UrbGrid, mass, mq2, mq3, eofa_shift, eofa_pm, M5, b, c);
-	DMobiusEOFA.ZeroCounters();
-	
-//	SchurDiagMooeeOperator<MobiusFermionD, LatticeFermionD> HermOpEO(DMobiusEOFA);
-//	ConjugateGradient<LatticeFermion> CG(1e-4, 2000, 0);// switch off the assert
+  MobiusEOFAFermionR DMobiusEOFA(Umu, *FGrid, *FrbGrid, *UGrid, *UrbGrid, mass, mq2, mq3, eofa_shift, eofa_pm, M5, b, c);
+  DMobiusEOFA.ZeroCounters();
+  
+//  SchurDiagMooeeOperator<MobiusFermionD, LatticeFermionD> HermOpEO(DMobiusEOFA);
+//  ConjugateGradient<LatticeFermion> CG(1e-4, 2000, 0);// switch off the assert
 
   printfQuda("EOFA solver test!\n");
 // Calling invertQuda(...) to perform the inversion.
@@ -345,10 +345,10 @@ int main(int argc, char** argv) {
   printfQuda("EOFA dslash test: Grid solution norm2 = %16.12e, Quda solution norm2 = %16.12e, "
     "error norm2 = %16.12e, error \% = %8.4e\n\n", norm2(sol), norm2(sol_quda), 
     norm2(err), std::sqrt(norm2(err)/norm2(sol)));
-	
+  
   DMobiusEOFA.Report();
 
   endQuda();
 
-	Grid_finalize();
+  Grid_finalize();
 }
