@@ -49,7 +49,7 @@ int main(int argc, char** argv) {
   RealD mq2         = 0.085;
   RealD mq3         = 1.0;
   RealD eofa_shift  = -1.0;
-  int eofa_pm       = 1;
+  int eofa_pm       = 0;
 
   // The conversion factor between Grid/CPS and Quda's Mobius 
   double conversion_factor = (b*(4-M5)+1);
@@ -145,7 +145,7 @@ int main(int argc, char** argv) {
   inv_param.eofa_pm       = eofa_pm;
  
   // The solver tolerance, i.e. |MdagM * x - b| < tol * |b|
-  inv_param.tol           = 1e-10;
+  inv_param.tol           = 1e-7;
   inv_param.tol_restart   = 1e-3;
   
   // The maximum number of iterations.
@@ -197,6 +197,10 @@ int main(int argc, char** argv) {
   // QUDA_DEBUG_VERBOSE is too nasty.
   inv_param.verbosity     = QUDA_VERBOSE;
 
+  // It seems the initial value of this is undefined so it's better to set it here. 
+  // If NO Quda will zero the input solution pointer before the solve.
+  inv_param.use_init_guess = QUDA_USE_INIT_GUESS_YES;
+
 //	qlat::Coordinate node_coor(UGrid->ThisProcessorCoor()[0], UGrid->ThisProcessorCoor()[1], UGrid->ThisProcessorCoor()[2], UGrid->ThisProcessorCoor()[3]);
 //	qlat::Coordinate node_size(GridDefaultMpi()[0], GridDefaultMpi()[1], GridDefaultMpi()[2], GridDefaultMpi()[3]);
 //	qlat::begin(qlat::index_from_coordinate(node_coor, node_size), node_size);
@@ -214,6 +218,7 @@ int main(int argc, char** argv) {
 	LatticeFermion src(FGrid); gaussian(RNG5, src);
 	LatticeFermion src_quda(FGrid); src_quda = zero;
   LatticeFermion sol(FGrid); sol = zero;
+	LatticeFermion sol_quda(FGrid); sol_quda = zero;
 	
   LatticeGaugeField Umu(UGrid);
 	SU3::HotConfiguration(RNG4, Umu);
@@ -287,9 +292,10 @@ int main(int argc, char** argv) {
 //	SchurDiagMooeeOperator<MobiusFermionD, LatticeFermionD> HermOpEO(DMobiusEOFA);
 //	ConjugateGradient<LatticeFermion> CG(1e-4, 2000, 0);// switch off the assert
 
+  printfQuda("EOFA solver test!\n");
 // Calling invertQuda(...) to perform the inversion.
   invertQuda(quda_sol, quda_src, &inv_param);
-  // dslashQuda_mobius_eofa(quda_sol, quda_src, &inv_param, QUDA_EVEN_PARITY, 0);
+  invertQuda(quda_sol, quda_src, &inv_param);
 
 // Change back to the usual Grid/CPS order and vectorize.
   std::vector<fsobj> in_lex(src._grid->lSites());
@@ -309,12 +315,38 @@ int main(int argc, char** argv) {
   // Compare src and src_quda.
   LatticeFermion err(FGrid);
   err = src - (1./conversion_factor) * src_quda;
-
-  printfQuda("EOFA: Grid source norm2 = %16.12e, Quda source norm2 = %16.12e, \n"
-    "error norm2 = %16.12e, error \% = %8.4e\n", norm2(src), norm2(src_quda), 
+  
+  printfQuda("EOFA solver test: Grid source norm2 = %16.12e, Quda source norm2 = %16.12e, "
+    "error norm2 = %16.12e, error \% = %8.4e\n\n", norm2(src), norm2(src_quda), 
     norm2(err), std::sqrt(norm2(err)/norm2(src)));
 
-	DMobiusEOFA.Report();
+  printfQuda("EOFA dslash test!\n");
+  dslashQuda_mobius_eofa(quda_sol, quda_src, &inv_param, QUDA_EVEN_PARITY, 2); // The last "2" means full dslash.
+
+// Change back to the usual Grid/CPS order and vectorize.
+  // std::vector<fsobj> in_lex(src._grid->lSites());
+  for(int grid_idx_4d = 0; grid_idx_4d < V; grid_idx_4d++){
+    Coordinate Y = coordinate_from_index(grid_idx_4d, local_dim);
+    int eo = (Y[0]+Y[1]+Y[2]+Y[3])%2;
+    for(int s = 0; s < Ls; s++){
+      int quda_idx = eo*Vh*Ls + s*Vh+grid_idx_4d/2;
+      int grid_idx = grid_idx_4d*Ls + s;
+      in_lex[grid_idx] = reinterpret_cast<fsobj*>(quda_sol)[quda_idx];
+    }
+  }
+  vectorizeFromLexOrdArray(in_lex, sol_quda);
+
+  // If we apply M on sol we should get src back, up to an overall numerical factor.
+  DMobiusEOFA.M(src, sol);
+  // Compare src and src_quda.
+  // LatticeFermion err(FGrid);
+  err = sol - conversion_factor * sol_quda;
+
+  printfQuda("EOFA dslash test: Grid solution norm2 = %16.12e, Quda solution norm2 = %16.12e, "
+    "error norm2 = %16.12e, error \% = %8.4e\n\n", norm2(sol), norm2(sol_quda), 
+    norm2(err), std::sqrt(norm2(err)/norm2(sol)));
+	
+  DMobiusEOFA.Report();
 
   endQuda();
 
